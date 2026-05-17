@@ -19,14 +19,21 @@ _level_map = {
 }
 
 
-def configure_logging(level_name: str = "info") -> None:
+def configure_logging(level_name: str = "info", log_file: str = "progress.log") -> None:
     level = _level_map.get(level_name.lower(), logging.INFO)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATE_FORMAT))
     root = logging.getLogger()
     root.setLevel(level)
     root.handlers.clear()
+
+    fmt = logging.Formatter(_FORMAT, datefmt=_DATE_FORMAT)
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(fmt)
     root.addHandler(handler)
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
 
 
 def get_logger(name: str) -> logging.Logger:
