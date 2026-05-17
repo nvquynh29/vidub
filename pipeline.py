@@ -1,6 +1,7 @@
 import concurrent.futures
 import gc
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from vidub.config import ASRConfig, TranslateConfig, TTSConfig
 from vidub.downloader import is_url, download as download_url
 from vidub.log_utils import get_logger
 from vidub.models import FileJob, Segment
-from vidub.parallel import scan_folder
+from vidub.parallel import ALL_MEDIA_EXTENSIONS, scan_folder
 from vidub.registry import ASR_ENGINES, TRANSLATE_ENGINES, TTS_ENGINES
 from vidub.srt_utils import read_srt, write_srt
 from vidub.state import (
@@ -49,6 +50,11 @@ def _find_existing_subtitle(video_path: str) -> str | None:
     parent = p.parent
     stem = p.stem
     for ext in _SUBTITLE_EXTS:
+        lang_srt = parent / f"{stem}_en{ext}"
+        if lang_srt.exists():
+            exact = parent / f"{stem}{ext}"
+            lang_srt.rename(exact)
+            return str(exact)
         exact = parent / f"{stem}{ext}"
         if exact.exists():
             return str(exact)
@@ -75,6 +81,21 @@ def _flush_gpu() -> None:
         stop_server()
     except Exception as e:
         log.debug("Failed to stop llama-server: %s", e)
+
+
+def _copy_non_media_files(input_root: Path, output_root: Path) -> int:
+    copied = 0
+    for root, _, filenames in os.walk(input_root):
+        for fn in sorted(filenames):
+            src = Path(root) / fn
+            rel = src.relative_to(input_root)
+            dst = output_root / rel
+            if src.suffix.lower() not in ALL_MEDIA_EXTENSIONS:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not dst.exists():
+                    shutil.copy2(str(src), str(dst))
+                    copied += 1
+    return copied
 
 
 class DubbingPipeline:
@@ -457,6 +478,10 @@ class BatchPipeline:
 
         jobs = self._build_jobs(_all, input_root)
         log.info("Found %d media files in %s", len(jobs), input_path)
+
+        copied = _copy_non_media_files(input_root, output_root)
+        if copied:
+            log.info("Copied %d non-media files to output folder", copied)
 
         state = load_state(output_root, self._config_hash)
         _init_state(output_root, jobs, self._config_hash)
