@@ -1,0 +1,22 @@
+[project]
+name = "vidub"
+version = "0.1.0"
+description = "Video dubbing tool with ASR, translation, and TTS pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydub",
+    "srt",
+]
+
+[tool.setuptools.packages.find]
+include = ["vidub", "vidub.*"]
+exclude = ["tts", "asr", "translate"]
+
+[project.optional-dependencies]
+qwen = ["qwen-asr"]
+faster-whisper = ["faster-whisper"]
+whisper-cpp = ["pywhispercpp"]
+tts = ["vieneu[gpu]"]
+tts-gpu = ["vieneu[gpu]"]
+translate = ["deep-translator", "httpx", "openai"]
