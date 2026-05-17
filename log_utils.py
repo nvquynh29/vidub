@@ -4,6 +4,7 @@ import sys
 import warnings
 
 warnings.filterwarnings("ignore", message=".*cpp extensions.*torch.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*local_dir_use_symlinks.*", category=UserWarning)
 os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
 
 _FORMAT = "%(asctime)s - %(levelname)s - %(message)s"

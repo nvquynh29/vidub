@@ -40,6 +40,14 @@ def _lmdeploy_supported() -> bool:
 class VieNeuTTSEngine(TTSEngine):
     def __init__(self, config: TTSConfig):
         super().__init__(config)
+
+        import vieneu.base
+        _base_init = vieneu.base.BaseVieneuTTS.__init__
+        def _patched_init(self, *args, **kwargs):
+            _base_init(self, *args, **kwargs)
+            self.max_context = 4096
+        vieneu.base.BaseVieneuTTS.__init__ = _patched_init
+
         from vieneu import Vieneu
 
         self._voice_embedding: Any = None
