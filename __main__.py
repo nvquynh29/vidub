@@ -56,7 +56,7 @@ def _add_asr_args(p):
 
 
 def _add_translate_args(p):
-    p.add_argument("--translate-engine", default="openai", choices=list(TRANSLATE_ENGINES.keys()) or ["google-translate", "openai"], help="Translation engine")
+    p.add_argument("--translate-engine", default="google-translate", choices=list(TRANSLATE_ENGINES.keys()) or ["google-translate", "openai"], help="Translation engine")
     p.add_argument("--target-lang", "-tl", default="vi", help="Target language code")
     p.add_argument("--api-key", default=None, help="API key (for OpenAI/LLM engine)")
     p.add_argument("--api-base", default="http://localhost:8888/v1", help="API base URL (for OpenAI engine)")

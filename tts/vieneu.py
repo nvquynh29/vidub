@@ -29,7 +29,7 @@ def _cuda_compute_capability() -> tuple[int, int] | None:
 
 
 def _lmdeploy_supported() -> bool:
-    """LMDeploy turbomind requires native bf16 (compute capability >= 8.0)."""
+    """LMDeploy turbomind requires Ampere or newer (compute capability >= 8.0)."""
     cap = _cuda_compute_capability()
     if cap is None:
         return False
@@ -42,11 +42,17 @@ class VieNeuTTSEngine(TTSEngine):
         super().__init__(config)
 
         import vieneu.base
+        import vieneu.fast as _vieneu_fast
         _base_init = vieneu.base.BaseVieneuTTS.__init__
-        def _patched_init(self, *args, **kwargs):
+        _orig_fast_init = _vieneu_fast.FastVieNeuTTS.__init__
+        def _patched_base_init(self, *args, **kwargs):
             _base_init(self, *args, **kwargs)
-            self.max_context = 4096
-        vieneu.base.BaseVieneuTTS.__init__ = _patched_init
+            self.max_context = 16384
+        def _patched_fast_init(self, *args, **kwargs):
+            _orig_fast_init(self, *args, **kwargs)
+            self.gen_config.max_new_tokens = 8192
+        vieneu.base.BaseVieneuTTS.__init__ = _patched_base_init
+        _vieneu_fast.FastVieNeuTTS.__init__ = _patched_fast_init
 
         from vieneu import Vieneu
 
@@ -61,20 +67,33 @@ class VieNeuTTSEngine(TTSEngine):
 
         if mode == "fast":
             if use_cuda and _lmdeploy_supported():
+                self._model = Vieneu(
+                    mode="fast",
+                    codec_repo="neuphonic/neucodec-onnx-decoder-int8",
+                    codec_device="cpu",
+                )
+                self._mode = "fast"
+                log.info("Fast mode (LMDeploy GPU, ONNX codec)")
+            elif use_cuda:
                 try:
-                    self._model = Vieneu(mode="fast")
-                    self._mode = "fast"
-                    log.info("Fast mode (LMDeploy GPU)")
+                    os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
+                    self._model = Vieneu(
+                        gguf_filename=None,
+                        backbone_device="cuda",
+                        codec_repo="neuphonic/neucodec",
+                        codec_device="cuda",
+                    )
+                    self._mode = "standard"
+                    log.info("Fast mode not supported on this GPU, using standard PyTorch CUDA mode (v2)")
                 except Exception as exc:
-                    log.warning("Fast mode failed: %s", exc)
+                    log.warning("PyTorch CUDA mode failed (%s), falling back to turbo", exc)
+                    self._model = Vieneu(mode="turbo", device="cuda")
+                    self._mode = "turbo"
+                    log.info("Turbo mode (CUDA)")
             else:
-                if not use_cuda:
-                    log.info("Fast mode requires CUDA, falling back to standard mode")
-                else:
-                    log.info("GPU lacks native bf16 (need sm_80+), falling back to standard PyTorch CUDA mode")
+                raise RuntimeError("Fast mode requires CUDA")
 
-        # PyTorch CUDA standard mode (v2 highest quality)
-        if self._model is None and mode in ("standard", "pytorch", "fast"):
+        if mode in ("standard", "pytorch"):
             if use_cuda:
                 try:
                     os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
@@ -88,35 +107,25 @@ class VieNeuTTSEngine(TTSEngine):
                     log.info("Standard mode (PyTorch CUDA, v2)")
                 except Exception as exc:
                     log.warning("Standard PyTorch CUDA mode failed: %s", exc)
-
-        # GGUF standard mode (fallback when PyTorch not available)
-        if self._model is None and mode in ("standard", "fast"):
-            if use_cuda:
-                try:
-                    self._model = Vieneu(backbone_device="cuda")
-                    self._mode = "standard"
-                    log.info("Standard mode (GGUF GPU, CUDA)")
-                except Exception as exc:
-                    log.warning("Standard GGUF GPU mode failed: %s", exc)
             if self._model is None:
-                try:
-                    self._model = Vieneu()
-                    self._mode = "standard"
-                    log.info("Standard mode (GGUF CPU)")
-                except Exception as exc:
-                    log.warning("Standard GGUF CPU mode failed: %s", exc)
-
-        if self._model is None:
-            try:
+                # Fall back to turbo (lightweight, no llama-cpp)
                 kwargs = {"mode": "turbo"}
                 if use_cuda:
                     kwargs["device"] = "cuda"
                 self._model = Vieneu(**kwargs)
                 self._mode = "turbo"
-                log.info("Turbo mode (GGUF, device=%s)", "cuda" if use_cuda else "cpu")
-            except Exception as exc:
-                log.warning("Turbo mode failed: %s", exc)
-                raise RuntimeError("No viable TTS backend could be initialized") from exc
+                log.info("Turbo mode (device=%s)", "cuda" if use_cuda else "cpu")
+
+        if mode == "turbo":
+            kwargs = {"mode": "turbo"}
+            if use_cuda:
+                kwargs["device"] = "cuda"
+            self._model = Vieneu(**kwargs)
+            self._mode = "turbo"
+            log.info("Turbo mode (device=%s)", "cuda" if use_cuda else "cpu")
+
+        if self._model is None:
+            raise RuntimeError("No viable TTS backend could be initialized")
 
         if config.voice_ref:
             if self._mode == "turbo":
@@ -152,12 +161,24 @@ class VieNeuTTSEngine(TTSEngine):
                 infer_kwargs["voice"] = self._preset_voice
 
         if hasattr(self._model, "infer_batch"):
-            audio_arrays = self._model.infer_batch(list(texts), **infer_kwargs)
+            try:
+                audio_arrays = self._model.infer_batch(list(texts), **infer_kwargs)
+            except Exception:
+                log.warning("infer_batch failed, falling back to per-segment inference", exc_info=True)
+                audio_arrays = []
+                for text in texts:
+                    try:
+                        audio_arrays.append(self._model.infer(text=text, **infer_kwargs))
+                    except Exception:
+                        log.warning("Skipping segment due to inference error: %s", text[:80])
+                        audio_arrays.append(None)
         else:
             audio_arrays = [self._model.infer(text=t, **infer_kwargs) for t in texts]
 
         file_map: dict[int, str] = {}
         for idx, audio in zip(indices, audio_arrays):
+            if audio is None:
+                continue
             path = os.path.join(output_dir, f"{prefix}seg_{idx:04d}.wav")
             self._model.save(audio, path)
             file_map[idx] = path
