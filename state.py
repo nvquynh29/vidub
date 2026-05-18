@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 
 from vidub.log_utils import get_logger
@@ -10,6 +11,7 @@ from vidub.models import FileJob
 log = get_logger("vidub.state")
 
 _STATE_FILE = ".vidub_state.json"
+_STATE_LOCK = threading.Lock()
 
 STAGES = [
     "audio_extracted",
@@ -68,19 +70,30 @@ def load_state(output_root: Path, config_hash: str) -> dict[str, list[str]] | No
 
 
 def _init_state(output_root: Path, jobs: list[FileJob], config_hash: str) -> None:
-    """Create initial state file with all jobs and empty completed_stages."""
-    state_jobs = {}
-    for j in jobs:
-        state_jobs[str(j.rel_path)] = {
-            "input_path": j.input_path,
-            "stem": j.stem,
-            "completed_stages": [],
-        }
-    data = {"config_hash": config_hash, "jobs": state_jobs}
+    """Create or merge state file for current jobs while preserving progress."""
     path = _state_path(output_root)
     os.makedirs(path.parent, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with _STATE_LOCK:
+        data: dict = {"config_hash": config_hash, "jobs": {}}
+        if path.exists():
+            try:
+                with open(path) as f:
+                    existing = json.load(f)
+                if existing.get("config_hash") == config_hash and isinstance(existing.get("jobs"), dict):
+                    data = existing
+            except Exception as e:
+                log.warning("Failed to merge existing state file, recreating: %s", e)
+        jobs_state = data.setdefault("jobs", {})
+        for j in jobs:
+            key = str(j.rel_path)
+            if key not in jobs_state:
+                jobs_state[key] = {
+                    "input_path": j.input_path,
+                    "stem": j.stem,
+                    "completed_stages": [],
+                }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
 
 
 def mark_stage_completed(output_root: Path, rel_path: str, stage: str) -> None:
@@ -89,14 +102,15 @@ def mark_stage_completed(output_root: Path, rel_path: str, stage: str) -> None:
     if not path.exists():
         return
     try:
-        with open(path) as f:
-            data = json.load(f)
-        key = str(rel_path)
-        if key not in data["jobs"]:
-            data["jobs"][key] = {"completed_stages": []}
-        if stage not in data["jobs"][key]["completed_stages"]:
-            data["jobs"][key]["completed_stages"].append(stage)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        with _STATE_LOCK:
+            with open(path) as f:
+                data = json.load(f)
+            key = str(rel_path)
+            if key not in data["jobs"]:
+                data["jobs"][key] = {"completed_stages": []}
+            if stage not in data["jobs"][key]["completed_stages"]:
+                data["jobs"][key]["completed_stages"].append(stage)
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
     except Exception as e:
         log.warning("Failed to update state for %s: %s", rel_path, e)

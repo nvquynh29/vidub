@@ -1,8 +1,10 @@
 import concurrent.futures
 import gc
 import os
+import queue
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -463,6 +465,219 @@ class BatchPipeline:
             results.append(r)
         return results
 
+    def _run_queued_pipeline(
+        self,
+        jobs: list[FileJob],
+        original_audio_root: Path,
+        tts_audio_root: Path,
+        output_root: Path,
+        state: dict[str, list[str]] | None,
+    ) -> None:
+        audio_queue: queue.Queue[FileJob | None] = queue.Queue()
+        asr_queue: queue.Queue[FileJob | None] = queue.Queue()
+        translate_queue: queue.Queue[FileJob | None] = queue.Queue()
+        tts_queue: queue.Queue[FileJob | None] = queue.Queue()
+
+        worker_errors: list[tuple[str, str, Exception]] = []
+        error_lock = threading.Lock()
+
+        def _record_error(stage: str, job: FileJob, exc: Exception) -> None:
+            with error_lock:
+                worker_errors.append((stage, str(job.rel_path), exc))
+            log.error("%s failed for %s: %s", stage, job.rel_path, exc)
+
+        def _audio_worker(job: FileJob) -> None:
+            if job.subtitle_path:
+                job.audio_path = job.input_path
+                if not self._is_stage_done(state, job.rel_path, "audio_extracted"):
+                    mark_stage_completed(self._output_root, str(job.rel_path), "audio_extracted")
+                asr_queue.put(job)
+                return
+
+            audio_path = original_audio_root / job.rel_path.parent / f"{job.stem}.wav"
+            if self._is_stage_done(state, job.rel_path, "audio_extracted") and audio_path.exists():
+                job.audio_path = str(audio_path)
+                asr_queue.put(job)
+                return
+
+            audio_dir = original_audio_root / job.rel_path.parent
+            os.makedirs(audio_dir, exist_ok=True)
+            job.audio_path = extract_audio(job.input_path, output_dir=str(audio_dir))
+            mark_stage_completed(self._output_root, str(job.rel_path), "audio_extracted")
+            asr_queue.put(job)
+
+        asr_engine = ASR_ENGINES[self.pipeline.asr_config.engine](self.pipeline.asr_config)
+
+        def _asr_worker(job: FileJob) -> None:
+            if job.subtitle_path:
+                job.segments = read_srt(job.subtitle_path)
+                srt_done = output_root / job.rel_path.parent / f"{job.stem}.original.srt"
+                if not srt_done.exists():
+                    out_subdir = output_root / job.rel_path.parent
+                    os.makedirs(out_subdir, exist_ok=True)
+                    write_srt(str(srt_done), job.segments)
+                if not self._is_stage_done(state, job.rel_path, "asr_done"):
+                    mark_stage_completed(self._output_root, str(job.rel_path), "asr_done")
+                if not self._is_stage_done(state, job.rel_path, "srt_written"):
+                    mark_stage_completed(self._output_root, str(job.rel_path), "srt_written")
+                translate_queue.put(job)
+                return
+
+            srt_path = output_root / job.rel_path.parent / f"{job.stem}.original.srt"
+            if self._is_stage_done(state, job.rel_path, "asr_done") and srt_path.exists():
+                job.segments = read_srt(str(srt_path))
+                if not self._is_stage_done(state, job.rel_path, "srt_written"):
+                    mark_stage_completed(self._output_root, str(job.rel_path), "srt_written")
+                translate_queue.put(job)
+                return
+
+            duration = get_audio_duration(job.audio_path)
+            job.segments = asr_engine.transcribe(
+                job.audio_path,
+                language=self.pipeline.asr_config.language,
+                duration=duration,
+            )
+            out_subdir = output_root / job.rel_path.parent
+            os.makedirs(out_subdir, exist_ok=True)
+            write_srt(str(srt_path), job.segments)
+            mark_stage_completed(self._output_root, str(job.rel_path), "asr_done")
+            mark_stage_completed(self._output_root, str(job.rel_path), "srt_written")
+            translate_queue.put(job)
+
+        translate_engine = None
+        if self.pipeline.translate_config:
+            translate_cls = TRANSLATE_ENGINES[self.pipeline.translate_config.engine]
+            translate_engine = translate_cls(self.pipeline.translate_config)
+
+        def _translate_worker(job: FileJob) -> None:
+            if not self.pipeline.translate_config:
+                tts_queue.put(job)
+                return
+
+            srt_path = output_root / job.rel_path.parent / f"{job.stem}.srt"
+            if self._is_stage_done(state, job.rel_path, "translated") and srt_path.exists():
+                job.translated = read_srt(str(srt_path))
+                tts_queue.put(job)
+                return
+
+            job.translated = translate_engine.translate(
+                job.segments if job.segments is not None else [],
+                self.pipeline.translate_config.target_lang,
+                self.pipeline.translate_config.source_lang,
+            )
+            out_subdir = output_root / job.rel_path.parent
+            os.makedirs(out_subdir, exist_ok=True)
+            write_srt(str(srt_path), job.translated)
+            mark_stage_completed(self._output_root, str(job.rel_path), "translated")
+            tts_queue.put(job)
+
+        tts_engine = None
+        if self.pipeline.tts_config:
+            tts_cls = TTS_ENGINES[self.pipeline.tts_config.engine]
+            tts_engine = tts_cls(self.pipeline.tts_config)
+
+        def _tts_compose_worker(job: FileJob) -> None:
+            if not self.pipeline.tts_config:
+                return
+
+            out_subdir = output_root / job.rel_path.parent
+            out_video = out_subdir / f"{job.stem}{job.ext}"
+            if self._is_stage_done(state, job.rel_path, "composed") and (not job.is_video or out_video.exists()):
+                return
+
+            tts_dir = str(tts_audio_root / job.rel_path.parent)
+            os.makedirs(tts_dir, exist_ok=True)
+            job.audio_files = tts_engine.synthesize_segments(_tts_segments(job), tts_dir, stem=job.stem)
+            job.composed_path = compose_audio(
+                _tts_segments(job),
+                job.audio_files,
+                tts_dir,
+                original_audio_path=job.audio_path,
+                stem=job.stem,
+            )
+            if job.is_video:
+                os.makedirs(out_subdir, exist_ok=True)
+                replace_video_audio(job.input_path, job.composed_path, str(out_video))
+            mark_stage_completed(self._output_root, str(job.rel_path), "composed")
+
+        def _run_worker(name: str, q: queue.Queue[FileJob | None], fn) -> None:
+            while True:
+                item = q.get()
+                if item is None:
+                    q.task_done()
+                    break
+                try:
+                    fn(item)
+                except Exception as exc:
+                    _record_error(name, item, exc)
+                finally:
+                    q.task_done()
+
+        from vidub.translate.llm import _NUM_TRANSLATE_WORKERS
+
+        audio_workers = max(1, min(4, os.cpu_count() or 1))
+        asr_workers = 1
+        translate_workers = max(1, _NUM_TRANSLATE_WORKERS if self.pipeline.translate_config else 1)
+        tts_workers = 1
+
+        threads: list[threading.Thread] = []
+        for idx in range(tts_workers):
+            t = threading.Thread(
+                target=_run_worker,
+                args=(f"tts-{idx}", tts_queue, _tts_compose_worker),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+        for idx in range(translate_workers):
+            t = threading.Thread(
+                target=_run_worker,
+                args=(f"translate-{idx}", translate_queue, _translate_worker),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+        for idx in range(asr_workers):
+            t = threading.Thread(
+                target=_run_worker,
+                args=(f"asr-{idx}", asr_queue, _asr_worker),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+        for idx in range(audio_workers):
+            t = threading.Thread(
+                target=_run_worker,
+                args=(f"audio-{idx}", audio_queue, _audio_worker),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+
+        for job in jobs:
+            audio_queue.put(job)
+        audio_queue.join()
+        for _ in range(audio_workers):
+            audio_queue.put(None)
+
+        asr_queue.join()
+        for _ in range(asr_workers):
+            asr_queue.put(None)
+
+        translate_queue.join()
+        for _ in range(translate_workers):
+            translate_queue.put(None)
+
+        tts_queue.join()
+        for _ in range(tts_workers):
+            tts_queue.put(None)
+
+        for t in threads:
+            t.join()
+
+        if worker_errors:
+            raise RuntimeError(f"Batch pipeline failed with {len(worker_errors)} worker errors")
+
     def run(self, input_path: str, output_dir: str) -> list[dict[str, str | list[str]]]:
         t_start = time.time()
         _all = scan_folder(input_path)
@@ -486,12 +701,8 @@ class BatchPipeline:
         state = load_state(output_root, self._config_hash)
         _init_state(output_root, jobs, self._config_hash)
 
-        self._stage1_audio_extraction(jobs, original_audio_root, state)
-        self._stage2_asr(jobs, state)
-        self._write_original_srts(jobs, output_root, state)
-        self._stage3_translation(jobs, output_root, state)
+        self._run_queued_pipeline(jobs, original_audio_root, tts_audio_root, output_root, state)
         _flush_gpu()
-        self._stage4_tts_and_compose(jobs, tts_audio_root, output_root, state)
         results = self._build_results(jobs, output_root)
 
         log.info("[SUMMARY] Total batch: %.2fs for %d files", time.time() - t_start, len(jobs))
