@@ -3,6 +3,7 @@
 
 import shutil
 import subprocess
+import sys
 from typing import Sequence
 
 
@@ -25,10 +26,12 @@ def _verify_runtime() -> None:
         "print('torch_cuda', torch.version.cuda); "
         "print('cuda_ok', torch.cuda.is_available()); "
         "print('torchaudio', torchaudio.__version__); "
+        "print('onnxruntime', ort.__version__); "
+        "print('onnxruntime_path', ort.__file__); "
         "print('providers', ','.join(ort.get_available_providers()))"
     )
     try:
-        out = _run_capture(["uv", "run", "python", "-c", py])
+        out = _run_capture([sys.executable, "-c", py])
     except subprocess.CalledProcessError as e:
         if e.stdout:
             print(e.stdout)
@@ -59,6 +62,9 @@ def main() -> None:
 
     # Keep these aligned to avoid ABI mismatch (torch/torchaudio/vision)
     torch_index = "https://download.pytorch.org/whl/cu128"
+    torch_pkg = "torch==2.11.0+cu128"
+    torchaudio_pkg = "torchaudio==2.11.0+cu128"
+    torchvision_pkg = "torchvision==0.26.0+cu128"
 
     print("Uninstalling potentially conflicting runtime packages...")
     _run([
@@ -69,12 +75,14 @@ def main() -> None:
     print("Installing CUDA-enabled PyTorch stack...")
     _run([
         "uv", "pip", "install",
+        "--reinstall",
         "--index-url", torch_index,
-        "torch", "torchaudio", "torchvision",
+        torch_pkg, torchaudio_pkg, torchvision_pkg,
     ])
 
     print("Installing ONNX Runtime GPU...")
-    _run(["uv", "pip", "install", "onnxruntime-gpu"])
+    _run(["uv", "pip", "uninstall", "onnxruntime", "onnxruntime-gpu"])
+    _run(["uv", "pip", "install", "--reinstall", "onnxruntime-gpu"])
 
     # Core dependencies
     core = [
@@ -99,10 +107,12 @@ def main() -> None:
     print("Re-applying CUDA-aligned runtime packages after vieneu install...")
     _run([
         "uv", "pip", "install",
+        "--reinstall",
         "--index-url", torch_index,
-        "torch", "torchaudio", "torchvision",
+        torch_pkg, torchaudio_pkg, torchvision_pkg,
     ])
-    _run(["uv", "pip", "install", "onnxruntime-gpu"])
+    _run(["uv", "pip", "uninstall", "onnxruntime", "onnxruntime-gpu"])
+    _run(["uv", "pip", "install", "--reinstall", "onnxruntime-gpu"])
 
     _verify_runtime()
 
