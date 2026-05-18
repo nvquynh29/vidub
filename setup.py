@@ -51,6 +51,14 @@ def _verify_runtime() -> None:
         raise RuntimeError("Verification failed: onnxruntime missing CUDAExecutionProvider")
     print("[verify] ✅ GPU runtime verification passed")
 
+    print("\n[verify] Checking neucodec + torch import...")
+    py_neucodec = (
+        "import neucodec, torch; "
+        "print('neucodec ok, torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+    )
+    out_neucodec = _run_capture([sys.executable, "-c", py_neucodec])
+    print(out_neucodec)
+
 
 def main() -> None:
     if not shutil.which("uv"):
@@ -91,6 +99,8 @@ def main() -> None:
         "charset-normalizer",
         "deep-translator",
         "openai",
+        "pyarrow<21",
+        "datasets>=2.16,<3",
     ]
 
     # Optional ASR engines
