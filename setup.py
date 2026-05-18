@@ -27,7 +27,14 @@ def _verify_runtime() -> None:
         "print('torchaudio', torchaudio.__version__); "
         "print('providers', ','.join(ort.get_available_providers()))"
     )
-    out = _run_capture(["uv", "run", "python", "-c", py])
+    try:
+        out = _run_capture(["uv", "run", "python", "-c", py])
+    except subprocess.CalledProcessError as e:
+        if e.stdout:
+            print(e.stdout)
+        if e.stderr:
+            print(e.stderr)
+        raise RuntimeError("Verification command failed; see stdout/stderr above") from e
     print(out)
 
     lines = out.splitlines()
@@ -45,6 +52,10 @@ def _verify_runtime() -> None:
 def main() -> None:
     if not shutil.which("uv"):
         raise RuntimeError("uv not found. Please install uv first: https://docs.astral.sh/uv/")
+
+    print("Updating apt package index and installing ffmpeg...")
+    _run(["sudo", "apt", "update"])
+    _run(["sudo", "apt", "install", "-y", "ffmpeg"])
 
     # Keep these aligned to avoid ABI mismatch (torch/torchaudio/vision)
     torch_index = "https://download.pytorch.org/whl/cu128"
@@ -84,6 +95,14 @@ def main() -> None:
     _run(["uv", "pip", "install", *core])
     _run(["uv", "pip", "install", *asr])
     _run(["uv", "pip", "install", "vieneu[gpu]"])
+
+    print("Re-applying CUDA-aligned runtime packages after vieneu install...")
+    _run([
+        "uv", "pip", "install",
+        "--index-url", torch_index,
+        "torch", "torchaudio", "torchvision",
+    ])
+    _run(["uv", "pip", "install", "onnxruntime-gpu"])
 
     _verify_runtime()
 
