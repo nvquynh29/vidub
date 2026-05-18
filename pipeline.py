@@ -1,5 +1,6 @@
 import concurrent.futures
 import gc
+import hashlib
 import os
 import queue
 import shutil
@@ -98,6 +99,58 @@ def _copy_non_media_files(input_root: Path, output_root: Path) -> int:
                     shutil.copy2(str(src), str(dst))
                     copied += 1
     return copied
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _snapshot_files(root: Path) -> set[Path]:
+    files: set[Path] = set()
+    for dirpath, _, filenames in os.walk(root):
+        base = Path(dirpath)
+        for fn in filenames:
+            files.add((base / fn).relative_to(root))
+    return files
+
+
+def _verify_output_tree(input_root: Path, output_root: Path) -> list[str]:
+    diffs: list[str] = []
+    input_files = _snapshot_files(input_root)
+
+    for rel in sorted(input_files):
+        src = input_root / rel
+        dst = output_root / rel
+        ext = src.suffix.lower()
+
+        if not dst.exists():
+            if ext in MEDIA_EXTENSIONS:
+                diffs.append(f"Missing dubbed/copied media output: {rel}")
+            else:
+                diffs.append(f"Missing copied non-media output: {rel}")
+            continue
+
+        if ext not in ALL_MEDIA_EXTENSIONS:
+            if src.stat().st_size != dst.stat().st_size:
+                diffs.append(f"Non-media size mismatch: {rel}")
+                continue
+            if _sha256_file(src) != _sha256_file(dst):
+                diffs.append(f"Non-media content mismatch: {rel}")
+
+    return diffs
+
+
+def _print_verification_result(title: str, diffs: list[str]) -> None:
+    if not diffs:
+        log.info("✅ %s", title)
+        return
+    log.error("❌ %s", title)
+    for d in diffs:
+        log.error("❌ %s", d)
 
 
 class DubbingPipeline:
@@ -698,12 +751,18 @@ class BatchPipeline:
         if copied:
             log.info("Copied %d non-media files to output folder", copied)
 
+        pre_diffs = _verify_output_tree(input_root, output_root)
+        _print_verification_result("Pre-run verification", pre_diffs)
+
         state = load_state(output_root, self._config_hash)
         _init_state(output_root, jobs, self._config_hash)
 
         self._run_queued_pipeline(jobs, original_audio_root, tts_audio_root, output_root, state)
         _flush_gpu()
         results = self._build_results(jobs, output_root)
+
+        post_diffs = _verify_output_tree(input_root, output_root)
+        _print_verification_result("Post-run verification", post_diffs)
 
         log.info("[SUMMARY] Total batch: %.2fs for %d files", time.time() - t_start, len(jobs))
         return results
