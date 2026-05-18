@@ -1,28 +1,69 @@
 #!/usr/bin/env python3
-"""Install dependencies for vidub using uv pip."""
+"""Install dependencies for vidub using uv."""
 
 import shutil
 import subprocess
-import sys
+from typing import Sequence
 
 
-def _has_gpu() -> bool:
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
-
-
-def _run(cmd: list[str]) -> None:
+def _run(cmd: Sequence[str]) -> None:
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
+def _run_capture(cmd: Sequence[str]) -> str:
+    print(f"Running: {' '.join(cmd)}")
+    p = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return p.stdout.strip()
+
+
+def _verify_runtime() -> None:
+    print("\n[verify] Checking torch/torchaudio/onnxruntime GPU runtime...")
+    py = (
+        "import torch, torchaudio, onnxruntime as ort; "
+        "print('torch', torch.__version__); "
+        "print('torch_cuda', torch.version.cuda); "
+        "print('cuda_ok', torch.cuda.is_available()); "
+        "print('torchaudio', torchaudio.__version__); "
+        "print('providers', ','.join(ort.get_available_providers()))"
+    )
+    out = _run_capture(["uv", "run", "python", "-c", py])
+    print(out)
+
+    lines = out.splitlines()
+    cuda_ok = any("cuda_ok True" in ln for ln in lines)
+    providers_line = next((ln for ln in lines if ln.startswith("providers ")), "")
+    has_cuda_provider = "CUDAExecutionProvider" in providers_line
+
+    if not cuda_ok:
+        raise RuntimeError("Verification failed: torch.cuda.is_available() is False")
+    if not has_cuda_provider:
+        raise RuntimeError("Verification failed: onnxruntime missing CUDAExecutionProvider")
+    print("[verify] ✅ GPU runtime verification passed")
+
+
 def main() -> None:
     if not shutil.which("uv"):
-        print("uv not found. Installing uv...")
-        _run([sys.executable, "-m", "pip", "install", "uv"])
+        raise RuntimeError("uv not found. Please install uv first: https://docs.astral.sh/uv/")
+
+    # Keep these aligned to avoid ABI mismatch (torch/torchaudio/vision)
+    torch_index = "https://download.pytorch.org/whl/cu128"
+
+    print("Uninstalling potentially conflicting runtime packages...")
+    _run([
+        "uv", "pip", "uninstall",
+        "torch", "torchaudio", "torchvision", "onnxruntime", "onnxruntime-gpu",
+    ])
+
+    print("Installing CUDA-enabled PyTorch stack...")
+    _run([
+        "uv", "pip", "install",
+        "--index-url", torch_index,
+        "torch", "torchaudio", "torchvision",
+    ])
+
+    print("Installing ONNX Runtime GPU...")
+    _run(["uv", "pip", "install", "onnxruntime-gpu"])
 
     # Core dependencies
     core = [
@@ -31,25 +72,20 @@ def main() -> None:
         "charset-normalizer",
         "deep-translator",
         "openai",
-        "torch",
     ]
 
     # Optional ASR engines
     asr = [
         "faster-whisper",
-        "pywhispercpp",
-        "qwen-asr",
+        # "pywhispercpp",
+        # "qwen-asr",
     ]
 
-    _run([sys.executable, "-m", "uv", "pip", "install", *core])
-    _run([sys.executable, "-m", "uv", "pip", "install", *asr])
+    _run(["uv", "pip", "install", *core])
+    _run(["uv", "pip", "install", *asr])
+    _run(["uv", "pip", "install", "vieneu[gpu]"])
 
-    if _has_gpu():
-        print("GPU detected — installing vieneu[gpu] (includes LMDeploy)")
-        _run([sys.executable, "-m", "uv", "pip", "install", "vieneu[gpu]"])
-    else:
-        print("No GPU — installing vieneu (CPU only)")
-        _run([sys.executable, "-m", "uv", "pip", "install", "vieneu"])
+    _verify_runtime()
 
 
 if __name__ == "__main__":

@@ -17,12 +17,18 @@ sudo apt install -y ffmpeg
 sudo apt-get install -y libcublas-12-8
 ```
 
-### PyTorch (< 2.11.0, e.g. 2.10.0)
+### Recommended GPU stack (RTX 6000 PRO)
 
-The faster-whisper ASR engine requires PyTorch **< 2.11.0** (e.g., `2.10.0+cu128`). Newer versions (`>= 2.11.0`) upgrade CUDA bindings to version 13+, which breaks the `cublas` API that faster-whisper depends on.
+For best throughput and stability on RTX 6000 PRO, use:
+
+- CUDA `12.8`
+- PyTorch `2.11`
+- GPU codec for TTS (`neuphonic/neucodec` with `--tts-codec-device cuda`)
+
+You can install the validated runtime stack with:
 
 ```bash
-pip install "torch<2.11.0" "torchaudio<2.11.0"
+python setup.py
 ```
 
 ## Installation
@@ -103,6 +109,14 @@ python -m vidub sub -i ./videos/ -o ./output -sl en -tl vi \
   --asr-engine faster-whisper
 ```
 
+### Recommended command (RTX 6000 PRO)
+
+```bash
+python -m vidub dub -i input_folder -o ./output -sl en -tl vi --device cuda --tts-device cuda --tts-mode standard --tts-profile max-gpu --tts-backbone-repo pnnbao-ump/VieNeu-TTS --tts-codec-repo neuphonic/neucodec --tts-codec-device cuda --tts-workers 0 --log-level info
+```
+
+`--tts-workers 0` enables auto-tuning (the runtime picks a safe worker count automatically).
+
 ## TTS
 
 The pipeline uses [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) for Vietnamese text-to-speech synthesis.
@@ -110,8 +124,10 @@ The pipeline uses [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) for Vietn
 | Argument | Default | Description |
 |---|---|---|
 | `--tts-engine` | `vieneu` | TTS engine |
-| `--tts-mode` | `fast` | `turbo` (GGUF), `standard` (PyTorch GPU/GGUF CPU), `fast` (LMDeploy GPU) |
+| `--tts-mode` | `standard` | `turbo` (GGUF), `standard` (PyTorch GPU/GGUF CPU), `fast` (LMDeploy GPU) |
+| `--tts-profile` | `max-gpu` | Runtime profile: `max-gpu` or `balanced` |
 | `--tts-device` | `cuda` | Target device: `cuda` (GPU) or `cpu` |
+| `--tts-workers` | `0` | Number of concurrent TTS workers in batch mode (`0` = auto-tune) |
 | `--tts-emotion` | `natural` | `natural` or `storytelling` (standard mode only) |
 | `--voice-ref` | — | Path to 3–5s reference audio for zero-shot voice cloning |
 
