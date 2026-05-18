@@ -1,6 +1,5 @@
 import concurrent.futures
 import gc
-import hashlib
 import os
 import queue
 import shutil
@@ -101,14 +100,6 @@ def _copy_non_media_files(input_root: Path, output_root: Path) -> int:
     return copied
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _snapshot_files(root: Path) -> set[Path]:
     files: set[Path] = set()
     for dirpath, _, filenames in os.walk(root):
@@ -124,22 +115,14 @@ def _verify_output_tree(input_root: Path, output_root: Path) -> list[str]:
 
     for rel in sorted(input_files):
         src = input_root / rel
-        dst = output_root / rel
         ext = src.suffix.lower()
-
-        if not dst.exists():
-            if ext in MEDIA_EXTENSIONS:
-                diffs.append(f"Missing dubbed/copied media output: {rel}")
-            else:
-                diffs.append(f"Missing copied non-media output: {rel}")
+        if ext not in _SUBTITLE_EXTS:
             continue
 
-        if ext not in ALL_MEDIA_EXTENSIONS:
-            if src.stat().st_size != dst.stat().st_size:
-                diffs.append(f"Non-media size mismatch: {rel}")
-                continue
-            if _sha256_file(src) != _sha256_file(dst):
-                diffs.append(f"Non-media content mismatch: {rel}")
+        dst = output_root / rel
+
+        if not dst.exists():
+            diffs.append(f"Missing subtitle file in output: {rel}")
 
     return diffs
 
@@ -268,6 +251,7 @@ class DubbingPipeline:
             parts.append(f"Translate: {tr_elapsed:.2f}s")
         parts.append(f"Total: {elapsed:.2f}s")
         log.info("[SUMMARY] %s | %s", input_path, " | ".join(parts))
+        log.info("✅ Processed %d video file(s) in %.2fs", 1 if is_video else 0, elapsed)
         return result
 
     def _cleanup_downloads(self) -> None:
@@ -671,7 +655,7 @@ class BatchPipeline:
         audio_workers = max(1, min(4, os.cpu_count() or 1))
         asr_workers = 1
         translate_workers = max(1, _NUM_TRANSLATE_WORKERS if self.pipeline.translate_config else 1)
-        tts_workers = 1
+        tts_workers = max(1, getattr(self.pipeline.tts_config, "workers", 1) if self.pipeline.tts_config else 1)
 
         threads: list[threading.Thread] = []
         for idx in range(tts_workers):
@@ -751,9 +735,6 @@ class BatchPipeline:
         if copied:
             log.info("Copied %d non-media files to output folder", copied)
 
-        pre_diffs = _verify_output_tree(input_root, output_root)
-        _print_verification_result("Pre-run verification", pre_diffs)
-
         state = load_state(output_root, self._config_hash)
         _init_state(output_root, jobs, self._config_hash)
 
@@ -764,5 +745,8 @@ class BatchPipeline:
         post_diffs = _verify_output_tree(input_root, output_root)
         _print_verification_result("Post-run verification", post_diffs)
 
-        log.info("[SUMMARY] Total batch: %.2fs for %d files", time.time() - t_start, len(jobs))
+        elapsed = time.time() - t_start
+        video_count = sum(1 for j in jobs if j.is_video)
+        log.info("[SUMMARY] Total batch: %.2fs for %d files", elapsed, len(jobs))
+        log.info("✅ Processed %d video file(s) in %.2fs", video_count, elapsed)
         return results

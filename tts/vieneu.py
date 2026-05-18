@@ -36,6 +36,16 @@ def _lmdeploy_supported() -> bool:
     return cap[0] >= 8
 
 
+def _gpu_vram_gb() -> float:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return float(torch.cuda.get_device_properties(0).total_memory) / (1024 ** 3)
+    except (ImportError, RuntimeError):
+        pass
+    return 0.0
+
+
 @register_tts("vieneu")
 class VieNeuTTSEngine(TTSEngine):
     def __init__(self, config: TTSConfig):
@@ -64,25 +74,47 @@ class VieNeuTTSEngine(TTSEngine):
 
         mode = config.mode
         use_cuda = _cuda_available() and config.device == "cuda"
+        prefer_max_gpu = config.profile == "max-gpu" and use_cuda
+        vram_gb = _gpu_vram_gb()
+
+        if prefer_max_gpu and mode == "fast" and vram_gb >= 40:
+            mode = "standard"
+            log.info("Switching TTS mode fast -> standard for max GPU profile (VRAM=%.1fGB)", vram_gb)
+
+        backbone_repo = config.backbone_repo
+        codec_repo = config.codec_repo
+        codec_device = config.codec_device
+
+        if prefer_max_gpu:
+            if backbone_repo is None and mode in ("standard", "pytorch"):
+                backbone_repo = "pnnbao-ump/VieNeu-TTS"
+            if codec_repo is None:
+                codec_repo = "neuphonic/neucodec"
+            if codec_device is None:
+                codec_device = "cuda"
 
         if mode == "fast":
             if use_cuda and _lmdeploy_supported():
-                self._model = Vieneu(
-                    mode="fast",
-                    codec_repo="neuphonic/neucodec-onnx-decoder-int8",
-                    codec_device="cpu",
-                )
+                kwargs: dict[str, Any] = {"mode": "fast"}
+                if backbone_repo is not None:
+                    kwargs["backbone_repo"] = backbone_repo
+                kwargs["codec_repo"] = codec_repo or "neuphonic/neucodec-onnx-decoder-int8"
+                kwargs["codec_device"] = codec_device or "cpu"
+                self._model = Vieneu(**kwargs)
                 self._mode = "fast"
                 log.info("Fast mode (LMDeploy GPU, ONNX codec)")
             elif use_cuda:
                 try:
                     os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
-                    self._model = Vieneu(
-                        gguf_filename=None,
-                        backbone_device="cuda",
-                        codec_repo="neuphonic/neucodec",
-                        codec_device="cuda",
-                    )
+                    kwargs = {
+                        "gguf_filename": None,
+                        "backbone_device": "cuda",
+                        "codec_repo": codec_repo or "neuphonic/neucodec",
+                        "codec_device": codec_device or "cuda",
+                    }
+                    if backbone_repo is not None:
+                        kwargs["backbone_repo"] = backbone_repo
+                    self._model = Vieneu(**kwargs)
                     self._mode = "standard"
                     log.info("Fast mode not supported on this GPU, using standard PyTorch CUDA mode (v2)")
                 except Exception as exc:
@@ -97,12 +129,15 @@ class VieNeuTTSEngine(TTSEngine):
             if use_cuda:
                 try:
                     os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
-                    self._model = Vieneu(
-                        gguf_filename=None,
-                        backbone_device="cuda",
-                        codec_repo="neuphonic/neucodec",
-                        codec_device="cuda",
-                    )
+                    kwargs = {
+                        "gguf_filename": None,
+                        "backbone_device": "cuda",
+                        "codec_repo": codec_repo or "neuphonic/neucodec",
+                        "codec_device": codec_device or "cuda",
+                    }
+                    if backbone_repo is not None:
+                        kwargs["backbone_repo"] = backbone_repo
+                    self._model = Vieneu(**kwargs)
                     self._mode = "standard"
                     log.info("Standard mode (PyTorch CUDA, v2)")
                 except Exception as exc:

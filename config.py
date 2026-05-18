@@ -59,20 +59,30 @@ class TranslateConfig:
 class TTSConfig:
     engine: str = "vieneu"
     mode: str = "fast"
+    profile: str = "balanced"
     voice_ref: str | None = None
     emotion: str = "natural"
     device: str = "cuda"
     silence_p: float = 0.05
     crossfade_p: float = 0.0
+    backbone_repo: str | None = None
+    codec_repo: str | None = None
+    codec_device: str | None = None
+    workers: int = 0
 
     @classmethod
     def from_args(cls, args):
         return cls(
             engine=args.tts_engine,
             mode=args.tts_mode,
+            profile=getattr(args, "tts_profile", "balanced"),
             voice_ref=args.voice_ref,
             emotion=args.tts_emotion,
             device=getattr(args, "tts_device", _default_device()),
             silence_p=getattr(args, "tts_silence_p", 0.05),
             crossfade_p=getattr(args, "tts_crossfade_p", 0.0),
+            backbone_repo=getattr(args, "tts_backbone_repo", None),
+            codec_repo=getattr(args, "tts_codec_repo", None),
+            codec_device=getattr(args, "tts_codec_device", None),
+            workers=max(0, int(getattr(args, "tts_workers", 0))),
         )

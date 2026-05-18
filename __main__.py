@@ -67,11 +67,16 @@ def _add_translate_args(p):
 
 def _add_tts_args(p):
     p.add_argument("--tts-engine", default="vieneu", help="TTS engine")
-    p.add_argument("--tts-mode", default="fast", choices=["standard", "turbo", "fast"], help="TTS mode")
+    p.add_argument("--tts-mode", default="standard", choices=["standard", "turbo", "fast"], help="TTS mode")
+    p.add_argument("--tts-profile", default="max-gpu", choices=["balanced", "max-gpu"], help="TTS runtime profile")
     p.add_argument("--voice-ref", default=None, help="Voice reference audio path")
     p.add_argument("--tts-emotion", default="natural", choices=["natural", "storytelling"], help="TTS emotion")
     default_dev = _default_device()
     p.add_argument("--tts-device", default=default_dev, choices=["cuda", "cpu"], help="Device to use for TTS inference (auto: %s)" % default_dev)
+    p.add_argument("--tts-workers", type=int, default=0, help="Number of concurrent TTS workers in batch mode (0=auto)")
+    p.add_argument("--tts-backbone-repo", default="pnnbao-ump/VieNeu-TTS", help="Override VieNeu backbone HF repo")
+    p.add_argument("--tts-codec-repo", default="neuphonic/neucodec", help="Override VieNeu codec HF repo")
+    p.add_argument("--tts-codec-device", default="cuda", choices=["cuda", "cpu"], help="Override codec device")
 
 
 def cmd_dub(args):
