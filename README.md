@@ -112,7 +112,7 @@ python -m vidub sub -i ./videos/ -o ./output -sl en -tl vi \
 ### Recommended command (RTX 6000 PRO)
 
 ```bash
-python -m vidub dub -i input_folder -o ./output -sl en -tl vi --device cuda --tts-device cuda --tts-mode standard --tts-profile max-gpu --tts-backbone-repo pnnbao-ump/VieNeu-TTS --tts-codec-repo neuphonic/neucodec --tts-codec-device cuda --tts-workers 0 --log-level info
+python -m vidub dub -i input_folder -o ./output -sl en -tl vi --device cuda --tts-device cuda --tts-mode standard --tts-profile max-gpu --tts-backbone-repo pnnbao-ump/VieNeu-TTS --tts-codec-repo neuphonic/neucodec --tts-codec-device cuda --tts-workers 8 --log-level info
 ```
 
 `--tts-workers 0` enables auto-tuning (the runtime picks a safe worker count automatically).
